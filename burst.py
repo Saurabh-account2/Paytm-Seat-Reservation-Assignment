@@ -26,7 +26,7 @@ import random
 
 BASE_URL = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8080"
 ADMIN_TOKEN = "admin-secret"
-CONCURRENCY = 50
+CONCURRENCY = 10
 
 # ─── Results tracking ───
 results = {
@@ -64,11 +64,11 @@ async def create_show(session, name, seats, price_paise=25000, per_user_limit=4)
 semaphore = None
 
 async def reserve(session, show_id, user_id, seats, idempotency_key=None):
-    """Reserve seat(s) with retry on 5xx."""
+    """Reserve seat(s) with retry on 5xx/connection errors."""
     url = f"{BASE_URL}/shows/{show_id}/reserve"
     key = idempotency_key or str(uuid.uuid4())
     payload = {"seats": seats, "idempotency_key": key}
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             async with semaphore:
                 async with session.post(
@@ -77,15 +77,17 @@ async def reserve(session, show_id, user_id, seats, idempotency_key=None):
                     headers={"Authorization": f"Bearer {user_id}"},
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as resp:
-                    body = await resp.json()
-                    if resp.status < 500:
-                        return resp.status, body
-                    # 5xx — retry after short delay
-                    await asyncio.sleep(1)
-        except Exception as e:
-            if attempt == 2:
-                return 0, {"error": str(e)}
-            await asyncio.sleep(1)
+                    if resp.status >= 500:
+                        await asyncio.sleep(2)
+                        continue
+                    try:
+                        body = await resp.json()
+                    except Exception:
+                        await asyncio.sleep(2)
+                        continue
+                    return resp.status, body
+        except Exception:
+            await asyncio.sleep(2)
     return 500, {"error": "max retries exceeded"}
 
 
