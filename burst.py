@@ -64,22 +64,29 @@ async def create_show(session, name, seats, price_paise=25000, per_user_limit=4)
 semaphore = None
 
 async def reserve(session, show_id, user_id, seats, idempotency_key=None):
-    """Reserve seat(s). Returns (status_code, body)."""
+    """Reserve seat(s) with retry on 5xx."""
     url = f"{BASE_URL}/shows/{show_id}/reserve"
     key = idempotency_key or str(uuid.uuid4())
     payload = {"seats": seats, "idempotency_key": key}
-    try:
-        async with semaphore:
-            async with session.post(
-                url,
-                json=payload,
-                headers={"Authorization": f"Bearer {user_id}"},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                body = await resp.json()
-                return resp.status, body
-    except Exception as e:
-        return 0, {"error": str(e)}
+    for attempt in range(3):
+        try:
+            async with semaphore:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {user_id}"},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    body = await resp.json()
+                    if resp.status < 500:
+                        return resp.status, body
+                    # 5xx — retry after short delay
+                    await asyncio.sleep(1)
+        except Exception as e:
+            if attempt == 2:
+                return 0, {"error": str(e)}
+            await asyncio.sleep(1)
+    return 500, {"error": "max retries exceeded"}
 
 
 async def get_show(session, show_id):
