@@ -83,10 +83,17 @@ async def reserve(session, show_id, user_id, seats, idempotency_key=None):
 
 
 async def get_show(session, show_id):
-    """Fetch show state."""
+    """Fetch show state with retry."""
     url = f"{BASE_URL}/shows/{show_id}"
-    async with session.get(url) as resp:
-        return await resp.json()
+    for attempt in range(5):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                await asyncio.sleep(2)
+        except Exception:
+            await asyncio.sleep(2)
+    raise Exception(f"Failed to fetch show {show_id} after retries")
 
 
 def classify(status, body):
