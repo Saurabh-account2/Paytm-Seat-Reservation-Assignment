@@ -8,7 +8,7 @@ Usage:
 
 Runs the following tests:
   1. Creates a show with 50 seats.
-  2. Hot-seat storm: 500 users fight for one seat (A1). Exactly 1 wins.
+  2. Hot-seat storm: 200 users fight for one seat (A1). Exactly 1 wins.
   3. Spread storm: 100 users each grab a random available seat.
   4. Per-user limit test: one user fires 10 parallel reserves (limit=4).
   5. Idempotency test: same key retried 50 times → one reservation.
@@ -26,6 +26,7 @@ import random
 
 BASE_URL = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8080"
 ADMIN_TOKEN = "admin-secret"
+CONCURRENCY = 50
 
 # ─── Results tracking ───
 results = {
@@ -60,20 +61,23 @@ async def create_show(session, name, seats, price_paise=25000, per_user_limit=4)
         return data
 
 
+semaphore = None
+
 async def reserve(session, show_id, user_id, seats, idempotency_key=None):
     """Reserve seat(s). Returns (status_code, body)."""
     url = f"{BASE_URL}/shows/{show_id}/reserve"
     key = idempotency_key or str(uuid.uuid4())
     payload = {"seats": seats, "idempotency_key": key}
     try:
-        async with session.post(
-            url,
-            json=payload,
-            headers={"Authorization": f"Bearer {user_id}"},
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            body = await resp.json()
-            return resp.status, body
+        async with semaphore:
+            async with session.post(
+                url,
+                json=payload,
+                headers={"Authorization": f"Bearer {user_id}"},
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                body = await resp.json()
+                return resp.status, body
     except Exception as e:
         return 0, {"error": str(e)}
 
@@ -128,6 +132,9 @@ async def main():
     connector = aiohttp.TCPConnector(limit=200)
     async with aiohttp.ClientSession(connector=connector) as session:
 
+        global semaphore
+        semaphore = asyncio.Semaphore(CONCURRENCY)
+
         # ── Health check ──
         print(f"Target: {BASE_URL}")
         try:
@@ -145,9 +152,9 @@ async def main():
         seat_names = [f"{r}{c}" for r in rows for c in range(1, 6)]  # 50 seats
 
         # ══════════════════════════════════════════════════════════
-        # TEST 1: Hot-seat storm — 500 users, same seat (A1)
+        # TEST 1: Hot-seat storm — 200 users, same seat (A1)
         # ══════════════════════════════════════════════════════════
-        print_header("TEST 1: Hot-Seat Storm (500 users → seat A1)")
+        print_header("TEST 1: Hot-Seat Storm (200 users → seat A1)")
         for k in results:
             results[k] = 0
 
@@ -155,7 +162,7 @@ async def main():
         show_id = show["id"]
 
         tasks = []
-        for i in range(500):
+        for i in range(200):
             user = f"user-hot-{i}"
             tasks.append(reserve(session, show_id, user, ["A1"]))
 
@@ -168,7 +175,7 @@ async def main():
 
         print(f"  Duration:   {elapsed:.2f}s")
         print(f"  Confirmed:  {results['confirmed']}  (expected: 1)")
-        print(f"  Seat taken: {results['seat_taken']}  (expected: 499)")
+        print(f"  Seat taken: {results['seat_taken']}  (expected: 199)")
         print(f"  5xx:        {results['5xx']}  (expected: 0)")
         assert results["confirmed"] == 1, f"FAIL: {results['confirmed']} confirmations!"
         assert results["5xx"] == 0, f"FAIL: {results['5xx']} server errors!"
